@@ -26,7 +26,7 @@ fn apply(diff: Patch, old: &str) -> String {
     if need_new_line {
         out.push("");
     }
-    out.join("")
+    out.join("\n")
 }
 
 static LAO: &str = "\
