@@ -243,11 +243,9 @@ fn chunks(input: Input) -> IResult<Input, ParsedHunks> {
 
     let (old_missing_newline, new_missing_newline) = hunks
         .last()
-        .map(|(_, old_missing_newline, new_missing_newline)| {
-            (*old_missing_newline, *new_missing_newline)
-        })
+        .map(|hunk| (hunk.old_missing_newline, hunk.new_missing_newline))
         .unwrap_or_default();
-    let hunks = hunks.into_iter().map(|(hunk, _, _)| hunk).collect();
+    let hunks = hunks.into_iter().map(|hunk| hunk.hunk).collect();
     Ok((
         span,
         ParsedHunks {
@@ -266,6 +264,7 @@ fn is_next_header(input: Input<'_>) -> bool {
         || input.starts_with("@@ ")
 }
 
+#[derive(Debug, PartialEq)]
 struct ParsedHunk<'a> {
     hunk: Hunk<'a>,
     old_missing_newline: bool,
@@ -673,8 +672,8 @@ mod tests {
  Therefore let there always be non-being,
    so we may see their subtlety,
  And let there always be being,\n";
-        let expected = (
-            Hunk {
+        let expected = ParsedHunk {
+            hunk: Hunk {
                 old_range: Range { start: 1, count: 7 },
                 new_range: Range { start: 1, count: 6 },
                 range_hint: "",
@@ -690,9 +689,9 @@ mod tests {
                     Line::Context("And let there always be being,"),
                 ],
             },
-            false,
-            false,
-        );
+            old_missing_newline: false,
+            new_missing_newline: false,
+        };
         test_parser!(chunk(sample) -> expected);
         Ok(())
     }
