@@ -106,7 +106,14 @@ fn patch(input: Input) -> IResult<Input, Patch> {
         return Ok(patch);
     }
     let (input, files) = headers(input)?;
-    let (input, (hunks, old_missing_newline, new_missing_newline)) = chunks(input)?;
+    let (
+        input,
+        ParsedHunks {
+            hunks,
+            old_missing_newline,
+            new_missing_newline,
+        },
+    ) = chunks(input)?;
     // Ignore trailing empty lines produced by some diff programs
     let (input, _) = many0(line_ending)(input)?;
 
@@ -224,8 +231,14 @@ fn header_line_content(input: Input) -> IResult<Input, File> {
     ))
 }
 
+struct ParsedHunks<'a> {
+    hunks: Vec<Hunk<'a>>,
+    old_missing_newline: bool,
+    new_missing_newline: bool,
+}
+
 // Hunks of the file differences
-fn chunks(input: Input) -> IResult<Input, (Vec<Hunk>, bool, bool)> {
+fn chunks(input: Input) -> IResult<Input, ParsedHunks> {
     let (span, hunks) = many1(chunk)(input)?;
 
     let (old_missing_newline, new_missing_newline) = hunks
@@ -235,7 +248,14 @@ fn chunks(input: Input) -> IResult<Input, (Vec<Hunk>, bool, bool)> {
         })
         .unwrap_or_default();
     let hunks = hunks.into_iter().map(|(hunk, _, _)| hunk).collect();
-    Ok((span, (hunks, old_missing_newline, new_missing_newline)))
+    Ok((
+        span,
+        ParsedHunks {
+            hunks,
+            old_missing_newline,
+            new_missing_newline,
+        },
+    ))
 }
 
 fn is_next_header(input: Input<'_>) -> bool {
@@ -244,6 +264,47 @@ fn is_next_header(input: Input<'_>) -> bool {
         || input.starts_with("--- ")
         || input.starts_with("+++ ")
         || input.starts_with("@@ ")
+}
+
+struct ParsedHunk<'a> {
+    hunk: Hunk<'a>,
+    old_missing_newline: bool,
+    new_missing_newline: bool,
+}
+
+enum LineOrEmptyLine<'a> {
+    Line(Line<'a>, bool),
+    EmptyLine,
+}
+
+impl<'a> LineOrEmptyLine<'a> {
+    fn is_new(&self) -> bool {
+        matches!(
+            self,
+            Self::EmptyLine | Self::Line(Line::Context(_), _) | Self::Line(Line::Add(_), _)
+        )
+    }
+
+    fn is_old(&self) -> bool {
+        matches!(
+            self,
+            Self::EmptyLine | Self::Line(Line::Context(_), _) | Self::Line(Line::Remove(_), _)
+        )
+    }
+
+    fn missing_new_line(&self) -> bool {
+        match self {
+            Self::Line(_, missing_new_line) => *missing_new_line,
+            Self::EmptyLine => false,
+        }
+    }
+
+    fn into_line(self) -> Line<'a> {
+        match self {
+            Self::Line(line, _) => line,
+            Self::EmptyLine => Line::Context(""),
+        }
+    }
 }
 
 /// Looks for lines starting with + or - or space, but not +++ or ---. Not a foolproof check.
@@ -274,39 +335,8 @@ fn is_next_header(input: Input<'_>) -> bool {
 ///FIXME: Use the ranges in the chunk header to figure out how many chunk lines to parse. Will need
 /// to figure out how to count in nom more robustly than many1!(). Maybe using switch!()?
 ///FIXME: The test_parse_triple_plus_minus_hack test will no longer panic when this is fixed.
-fn chunk(input: Input) -> IResult<Input, (Hunk, bool, bool)> {
+fn chunk(input: Input) -> IResult<Input, ParsedHunk> {
     let (input, ranges) = chunk_header(input)?;
-
-    enum ParsedLine<'a> {
-        Line(Line<'a>, bool),
-        EmptyLine,
-    }
-    impl<'a> ParsedLine<'a> {
-        fn is_new(&self) -> bool {
-            matches!(
-                self,
-                Self::EmptyLine | Self::Line(Line::Context(_), _) | Self::Line(Line::Add(_), _)
-            )
-        }
-        fn is_old(&self) -> bool {
-            matches!(
-                self,
-                Self::EmptyLine | Self::Line(Line::Context(_), _) | Self::Line(Line::Remove(_), _)
-            )
-        }
-        fn missing_new_line(&self) -> bool {
-            match self {
-                Self::Line(_, missing_new_line) => *missing_new_line,
-                Self::EmptyLine => false,
-            }
-        }
-        fn into_line(self) -> Line<'a> {
-            match self {
-                Self::Line(line, _) => line,
-                Self::EmptyLine => Line::Context(""),
-            }
-        }
-    }
 
     // Parse chunk lines, using the range information to guide parsing
     let (input, mut lines) = many0(verify(
@@ -314,27 +344,31 @@ fn chunk(input: Input) -> IResult<Input, (Hunk, bool, bool)> {
             // Detect added lines
             map(
                 preceded(tuple((char('+'), not(tag("++ ")))), consume_content_line),
-                |(line, missing_new_line)| ParsedLine::Line(Line::Add(line), missing_new_line),
+                |(line, missing_new_line)| LineOrEmptyLine::Line(Line::Add(line), missing_new_line),
             ),
             // Detect removed lines
             map(
                 preceded(tuple((char('-'), not(tag("-- ")))), consume_content_line),
-                |(line, missing_new_line)| ParsedLine::Line(Line::Remove(line), missing_new_line),
+                |(line, missing_new_line)| {
+                    LineOrEmptyLine::Line(Line::Remove(line), missing_new_line)
+                },
             ),
             // Detect context lines
             map(
                 preceded(char(' '), consume_content_line),
-                |(line, missing_new_line)| ParsedLine::Line(Line::Context(line), missing_new_line),
+                |(line, missing_new_line)| {
+                    LineOrEmptyLine::Line(Line::Context(line), missing_new_line)
+                },
             ),
             // Handle empty lines within the chunk
-            map(tag("\n"), |_| ParsedLine::EmptyLine),
+            map(tag("\n"), |_| LineOrEmptyLine::EmptyLine),
         )),
         // Stop parsing when we detect the next header or have parsed the expected number of lines
         |_| !is_next_header(input),
     ))(input)?;
 
     // remove trailing empty lines
-    while matches!(lines.last(), Some(ParsedLine::EmptyLine)) {
+    while matches!(lines.last(), Some(LineOrEmptyLine::EmptyLine)) {
         lines.pop();
     }
 
@@ -348,13 +382,13 @@ fn chunk(input: Input) -> IResult<Input, (Hunk, bool, bool)> {
         .filter(|line| line.is_new())
         .any(|line| line.missing_new_line());
 
-    let lines = lines.into_iter().map(ParsedLine::into_line).collect();
+    let lines = lines.into_iter().map(LineOrEmptyLine::into_line).collect();
 
     let (old_range, new_range, range_hint) = ranges;
     Ok((
         input,
-        (
-            Hunk {
+        ParsedHunk {
+            hunk: Hunk {
                 old_range,
                 new_range,
                 range_hint,
@@ -362,7 +396,7 @@ fn chunk(input: Input) -> IResult<Input, (Hunk, bool, bool)> {
             },
             old_missing_newline,
             new_missing_newline,
-        ),
+        },
     ))
 }
 
