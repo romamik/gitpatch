@@ -277,41 +277,78 @@ fn is_next_header(input: Input<'_>) -> bool {
 fn chunk(input: Input) -> IResult<Input, (Hunk, bool, bool)> {
     let (input, ranges) = chunk_header(input)?;
 
+    enum ParsedLine<'a> {
+        Line(Line<'a>, bool),
+        EmptyLine,
+    }
+    impl<'a> ParsedLine<'a> {
+        fn is_new(&self) -> bool {
+            matches!(
+                self,
+                Self::EmptyLine | Self::Line(Line::Context(_), _) | Self::Line(Line::Add(_), _)
+            )
+        }
+        fn is_old(&self) -> bool {
+            matches!(
+                self,
+                Self::EmptyLine | Self::Line(Line::Context(_), _) | Self::Line(Line::Remove(_), _)
+            )
+        }
+        fn missing_new_line(&self) -> bool {
+            match self {
+                Self::Line(_, missing_new_line) => *missing_new_line,
+                Self::EmptyLine => false,
+            }
+        }
+        fn into_line(self) -> Line<'a> {
+            match self {
+                Self::Line(line, _) => line,
+                Self::EmptyLine => Line::Context(""),
+            }
+        }
+    }
+
     // Parse chunk lines, using the range information to guide parsing
-    let (input, lines) = many0(verify(
+    let (input, mut lines) = many0(verify(
         alt((
             // Detect added lines
             map(
                 preceded(tuple((char('+'), not(tag("++ ")))), consume_content_line),
-                |(line, missing_new_line)| (Line::Add(line), missing_new_line),
+                |(line, missing_new_line)| ParsedLine::Line(Line::Add(line), missing_new_line),
             ),
             // Detect removed lines
             map(
                 preceded(tuple((char('-'), not(tag("-- ")))), consume_content_line),
-                |(line, missing_new_line)| (Line::Remove(line), missing_new_line),
+                |(line, missing_new_line)| ParsedLine::Line(Line::Remove(line), missing_new_line),
             ),
             // Detect context lines
             map(
                 preceded(char(' '), consume_content_line),
-                |(line, missing_new_line)| (Line::Context(line), missing_new_line),
+                |(line, missing_new_line)| ParsedLine::Line(Line::Context(line), missing_new_line),
             ),
             // Handle empty lines within the chunk
-            map(tag("\n"), |_| (Line::Context(""), false)),
+            map(tag("\n"), |_| ParsedLine::EmptyLine),
         )),
         // Stop parsing when we detect the next header or have parsed the expected number of lines
         |_| !is_next_header(input),
     ))(input)?;
 
+    // remove trailing empty lines
+    while matches!(lines.last(), Some(ParsedLine::EmptyLine)) {
+        lines.pop();
+    }
+
+    // was there "missing new line" indicator for any of the lines?
     let old_missing_newline = lines
         .iter()
-        .filter(|(line, _)| matches!(line, Line::Remove(_) | Line::Context(_)))
-        .any(|(_, missing_new_line)| *missing_new_line);
+        .filter(|line| line.is_old())
+        .any(|line| line.missing_new_line());
     let new_missing_newline = lines
         .iter()
-        .filter(|(line, _)| matches!(line, Line::Add(_) | Line::Context(_)))
-        .any(|(_, missing_new_line)| *missing_new_line);
+        .filter(|line| line.is_new())
+        .any(|line| line.missing_new_line());
 
-    let lines = lines.into_iter().map(|(line, _)| line).collect();
+    let lines = lines.into_iter().map(ParsedLine::into_line).collect();
 
     let (old_range, new_range, range_hint) = ranges;
     Ok((
