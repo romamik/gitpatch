@@ -1,5 +1,5 @@
 use chrono::DateTime;
-use gitpatch::{File, FileMetadata, Line, LineKind, ParseError, Patch};
+use gitpatch::{File, FileMetadata, Line, ParseError, Patch};
 
 use pretty_assertions::assert_eq;
 
@@ -437,14 +437,10 @@ index d923f10..b47f160 100644
     assert_eq!(patches[0].old.path, "a/src/ast.rs");
     assert_eq!(patches[0].new.path, "b/src/ast-2.rs");
 
-    assert!(patches[0].hunks[0].lines.iter().any(|line| matches!(
-        line,
-        Line {
-            kind: LineKind::Add,
-            content: "use new_crate;",
-            missing_newline: false
-        }
-    )));
+    assert!(patches[0].hunks[0]
+        .lines
+        .iter()
+        .any(|line| matches!(line, Line::Add("use new_crate;"))));
 }
 
 #[test]

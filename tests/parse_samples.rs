@@ -28,7 +28,7 @@ fn parse_samples() {
                 path, err
             )
         });
-        assert_eq!(patches, patches2);
+        assert_eq!(patches, patches2,);
     }
 }
 
